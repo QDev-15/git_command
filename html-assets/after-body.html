@@ -1,0 +1,134 @@
+<div id="toast"></div>
+<script>
+(function () {
+  // ---- Layout: move pandoc's TOC into a fixed sidebar with a search box ----
+  const toc = document.getElementById('TOC');
+  const sidebar = document.createElement('aside');
+  sidebar.id = 'sidebar';
+  sidebar.innerHTML =
+    '<div class="brand">Sổ tay Git <button id="theme-toggle" title="Đổi giao diện sáng / tối">◐</button></div>' +
+    '<input id="search" type="search" placeholder="Tìm lệnh... (vd: hoan tac, stash, tai khoan)" autocomplete="off">' +
+    '<div id="search-info">Gõ để lọc. Không cần dấu. Phím / để tìm nhanh.</div>';
+  if (toc) sidebar.appendChild(toc);
+  const main = document.createElement('main');
+  main.id = 'content';
+  while (document.body.firstChild) main.appendChild(document.body.firstChild);
+  document.body.appendChild(sidebar);
+  document.body.appendChild(main);
+  document.body.appendChild(document.getElementById('toast') || document.createElement('div'));
+
+  // The markdown's own "Mục lục" duplicates the sidebar: hide it in HTML.
+  document.querySelectorAll('main section').forEach(s => {
+    const h = s.querySelector(':scope > h2');
+    if (h && h.textContent.trim().startsWith('Mục lục')) s.style.display = 'none';
+  });
+  document.querySelectorAll("nav#TOC a").forEach(a => { if (a.textContent.trim().startsWith("Mục lục")) a.parentElement.style.display = "none"; });
+
+  // ---- Theme toggle (remembered per browser) ----
+  const root = document.documentElement;
+  try { const t = localStorage.getItem('git-guide-theme'); if (t) root.dataset.theme = t; } catch (e) {}
+  document.getElementById('theme-toggle').onclick = () => {
+    const dark = root.dataset.theme ? root.dataset.theme === 'dark'
+      : matchMedia('(prefers-color-scheme: dark)').matches;
+    root.dataset.theme = dark ? 'light' : 'dark';
+    try { localStorage.setItem('git-guide-theme', root.dataset.theme); } catch (e) {}
+  };
+
+  // ---- Toast ----
+  const toast = document.getElementById('toast');
+  let toastTimer;
+  function notify(msg) {
+    toast.textContent = msg; toast.classList.add('show');
+    clearTimeout(toastTimer); toastTimer = setTimeout(() => toast.classList.remove('show'), 1400);
+  }
+  function copy(text) {
+    (navigator.clipboard ? navigator.clipboard.writeText(text) : Promise.reject())
+      .then(() => notify('Đã copy: ' + (text.length > 60 ? text.slice(0, 60) + '…' : text)))
+      .catch(() => {
+        const ta = document.createElement('textarea'); ta.value = text; document.body.appendChild(ta);
+        ta.select(); document.execCommand('copy'); ta.remove(); notify('Đã copy');
+      });
+  }
+
+  // ---- Code blocks: copy button + click a line to copy the command without its comment ----
+  document.querySelectorAll('pre').forEach(pre => {
+    const btn = document.createElement('button');
+    btn.className = 'copy-btn'; btn.textContent = 'Copy';
+    btn.onclick = e => { e.stopPropagation(); copy(pre.innerText.replace(/^Copy\n?/, '').trimEnd()); };
+    pre.appendChild(btn);
+    const isShell = pre.classList.contains('bash') || pre.closest('.bash');
+    if (!isShell) return;
+    pre.classList.add('cmd-lines');
+    pre.querySelectorAll('code > span').forEach(line => {
+      line.title = 'Bấm để copy lệnh (bỏ phần chú thích)';
+      line.addEventListener('click', () => {
+        const raw = line.textContent;
+        if (/^\s*#/.test(raw) || !raw.trim()) return;
+        copy(raw.replace(/\s{2,}#.*$/, '').trim());
+      });
+    });
+  });
+
+  // ---- Warning markers ----
+  const walker = document.createTreeWalker(main, NodeFilter.SHOW_TEXT);
+  const warnNodes = [];
+  while (walker.nextNode()) if (walker.currentNode.nodeValue.includes('⚠')) warnNodes.push(walker.currentNode);
+  warnNodes.forEach(n => {
+    const span = document.createElement('span');
+    span.innerHTML = n.nodeValue.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/⚠+/g, m => '<span class="warn">' + m + '</span>');
+    n.replaceWith(span);
+  });
+
+  // ---- Search: accent-insensitive filter over code lines, table rows, list items, paragraphs ----
+  const fold = s => s.normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/đ/g, 'd').replace(/Đ/g, 'D').toLowerCase();
+  const sections = [...main.querySelectorAll('section')];
+  const items = [...main.querySelectorAll('pre code > span, tbody tr, li, p')]
+    .filter(el => !el.closest('nav') && !(el.tagName === 'P' && el.closest('li')));
+  items.forEach(el => { el._text = fold(el.textContent); });
+  sections.forEach(s => { s._heading = fold((s.querySelector(':scope > h2, :scope > h3') || {}).textContent || ''); });
+  const search = document.getElementById('search');
+  const info = document.getElementById('search-info');
+
+  function applySearch() {
+    const terms = fold(search.value).split(/\s+/).filter(Boolean);
+    items.forEach(el => el.classList.remove('hit', 'search-hidden'));
+    sections.forEach(s => s.classList.remove('search-hidden'));
+    main.querySelectorAll('pre, table').forEach(el => el.classList.remove('search-hidden'));
+    if (!terms.length) { info.textContent = 'Gõ để lọc. Không cần dấu. Phím / để tìm nhanh.'; return; }
+
+    const matches = t => terms.every(w => t.includes(w));
+    let count = 0;
+    items.forEach(el => {
+      if (matches(el._text)) { el.classList.add('hit'); count++; }
+      else if (el.matches('pre code > span, tbody tr')) el.classList.add('search-hidden');
+    });
+    // Hide code blocks / tables with no hit, then sections with no hit and no matching heading.
+    main.querySelectorAll('pre').forEach(pre => { if (!pre.querySelector('.hit')) pre.classList.add('search-hidden'); });
+    main.querySelectorAll('table').forEach(t => { if (!t.querySelector('.hit')) t.classList.add('search-hidden'); });
+    sections.slice().reverse().forEach(s => {
+      const own = matches(s._heading);
+      if (own) { s.querySelectorAll('.search-hidden').forEach(e => e.classList.remove('search-hidden')); return; }
+      if (!s.querySelector('.hit')) s.classList.add('search-hidden');
+    });
+    info.textContent = count ? count + ' kết quả' : 'Không tìm thấy';
+  }
+  let timer;
+  search.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(applySearch, 120); });
+  document.addEventListener('keydown', e => {
+    if (e.key === '/' && document.activeElement !== search) { e.preventDefault(); search.focus(); search.select(); }
+    if (e.key === 'Escape' && document.activeElement === search) { search.value = ''; applySearch(); }
+  });
+
+  // ---- Highlight the current section in the TOC ----
+  const links = [...document.querySelectorAll('nav#TOC a')];
+  const byId = new Map(links.map(a => [decodeURIComponent(a.getAttribute('href').slice(1)), a]));
+  const obs = new IntersectionObserver(entries => {
+    entries.forEach(en => {
+      if (!en.isIntersecting) return;
+      const a = byId.get(en.target.id);
+      if (a) { links.forEach(l => l.classList.remove('active')); a.classList.add('active'); }
+    });
+  }, { rootMargin: '0px 0px -75% 0px' });
+  main.querySelectorAll('h2[id], h3[id], section[id]').forEach(h => obs.observe(h));
+})();
+</script>
